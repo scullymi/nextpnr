@@ -129,6 +129,101 @@ void GowinPacker::pack_bandgap(void)
 }
 
 // ===================================
+// Clock inverters in front of memories
+// ===================================
+// Synthesis puts an inverter (LUT1 or INV) in front of the clock of a memory
+// on the falling edge. The memory blocks invert their clock pins themselves,
+// as the vendor tools do: the pin takes the clock net directly and the
+// inversion goes into a <pin>_INV parameter. Flip-flops on the inverted clock,
+// including the ones the BSRAM packer adds, switch to the other edge. The
+// memory then gets its clock from the clock network instead of from a LUT.
+void GowinPacker::pack_clock_inverters(void)
+{
+    log_info("Pack clock inverters...\n");
+
+    static const dict<IdString, IdString> other_edge = {
+            {id_DFF, id_DFFN},     {id_DFFN, id_DFF},     {id_DFFE, id_DFFNE},   {id_DFFNE, id_DFFE},
+            {id_DFFS, id_DFFNS},   {id_DFFNS, id_DFFS},   {id_DFFSE, id_DFFNSE}, {id_DFFNSE, id_DFFSE},
+            {id_DFFR, id_DFFNR},   {id_DFFNR, id_DFFR},   {id_DFFRE, id_DFFNRE}, {id_DFFNRE, id_DFFRE},
+            {id_DFFP, id_DFFNP},   {id_DFFNP, id_DFFP},   {id_DFFPE, id_DFFNPE}, {id_DFFNPE, id_DFFPE},
+            {id_DFFC, id_DFFNC},   {id_DFFNC, id_DFFC},   {id_DFFCE, id_DFFNCE}, {id_DFFNCE, id_DFFCE}};
+
+    // the input net of an inverter, nullptr for any other cell
+    auto inverter_input = [&](CellInfo *ci) -> NetInfo * {
+        if (ci->type == id_INV) {
+            return ci->getPort(id_I);
+        }
+        if (ci->type == id_LUT1 && ci->params.count(id_INIT) && ci->params.at(id_INIT).as_int64() == 1) {
+            return ci->getPort(id_I0);
+        }
+        return nullptr;
+    };
+
+    // only inverters that drive a memory clock, the flip-flops alone are left to synthesis
+    std::vector<CellInfo *> inverters;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (inverter_input(ci) == nullptr) {
+            continue;
+        }
+        NetInfo *out = ci->getPort(ci->type == id_INV ? id_O : id_F);
+        if (out == nullptr) {
+            continue;
+        }
+        for (auto &usr : out->users) {
+            if ((is_ssram(usr.cell) && usr.port == id_CLK) ||
+                (is_bsram(usr.cell) && usr.port.in(id_CLK, id_CLKA, id_CLKB))) {
+                inverters.push_back(ci);
+                break;
+            }
+        }
+    }
+
+    int mem_pins = 0, ffs = 0;
+    std::vector<IdString> cells_to_remove;
+    for (CellInfo *inv : inverters) {
+        NetInfo *clk = inverter_input(inv);
+        NetInfo *out = inv->getPort(inv->type == id_INV ? id_O : id_F);
+        // copy, the loop changes the users of the net
+        std::vector<PortRef> users;
+        for (auto &usr : out->users) {
+            users.push_back(usr);
+        }
+        for (auto &usr : users) {
+            CellInfo *ci = usr.cell;
+            IdString pin = usr.port;
+            if ((is_ssram(ci) && pin == id_CLK) || (is_bsram(ci) && pin.in(id_CLK, id_CLKA, id_CLKB))) {
+                // CLK of a BSRAM is the A port
+                IdString inv_param = ctx->idf("%s_INV", (is_bsram(ci) && pin == id_CLK) ? "CLKA" : pin.c_str(ctx));
+                ci->setParam(inv_param, 1);
+                ++mem_pins;
+            } else if (is_dff(ci) && pin == id_CLK &&
+                       (!gwu.has_DFF67() || ci->type.in(id_DFF, id_DFFN))) {
+                // On GW5A (the chips with DFF6/7) synthesis builds flip-flops with enable or
+                // reset on the rising edge only, so only DFF and DFFN change edge there.
+                ci->type = other_edge.at(ci->type);
+                ++ffs;
+            } else {
+                continue;
+            }
+            ci->disconnectPort(pin);
+            ci->connectPort(pin, clk);
+        }
+        if (out->users.empty()) {
+            inv->disconnectPort(inv->type == id_INV ? id_I : id_I0);
+            inv->disconnectPort(inv->type == id_INV ? id_O : id_F);
+            ctx->nets.erase(out->name);
+            cells_to_remove.push_back(inv->name);
+        }
+    }
+    for (auto name : cells_to_remove) {
+        ctx->cells.erase(name);
+    }
+    log_info("  %d memory clock pins and %d flip-flops take the clock net, %zu inverters removed\n", mem_pins, ffs,
+             cells_to_remove.size());
+}
+
+// ===================================
 // Replace INV with LUT
 // ===================================
 void GowinPacker::pack_inv(void)
@@ -642,6 +737,9 @@ void GowinPacker::run(void)
     ctx->check();
 
     pack_dsp();
+    ctx->check();
+
+    pack_clock_inverters();
     ctx->check();
 
     pack_inv();

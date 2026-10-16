@@ -36,6 +36,7 @@ struct GowinPacker
     void pack_alus(void);
     void pack_ssram(void);
     void pack_inv(void);
+    void pack_clock_inverters(void);
 
     // BSRAM
     void pack_bsram(void);

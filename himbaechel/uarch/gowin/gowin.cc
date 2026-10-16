@@ -40,6 +40,7 @@ struct GowinImpl : HimbaechelAPI
     void notifyBelChange(BelId bel, CellInfo *cell) override;
 
     delay_t estimateDelay(WireId src, WireId dst) const override;
+    TimingClockingInfo getPortClockingInfo(const CellInfo *cell, IdString port, int index) const override;
 
     // Bel bucket functions
     IdString getBelBucketForCellType(IdString cell_type) const override;
@@ -1771,6 +1772,20 @@ void GowinImpl::drawBel(std::vector<GraphicElement> &g, GraphicElement::style_t 
         g.push_back(el);
         break;
     }
+}
+
+// A memory with an inverted clock pin (see pack_clock_inverters) works on the falling edge
+TimingClockingInfo GowinImpl::getPortClockingInfo(const CellInfo *cell, IdString port, int index) const
+{
+    TimingClockingInfo info = ctx->get_port_clocking_info_default(cell, port, index);
+    if (is_ssram(cell) || is_bsram(cell)) {
+        IdString clk = (is_bsram(cell) && info.clock_port == id_CLK) ? id_CLKA : info.clock_port;
+        auto inv = cell->params.find(ctx->idf("%s_INV", clk.c_str(ctx)));
+        if (inv != cell->params.end() && inv->second.as_bool()) {
+            info.edge = (info.edge == RISING_EDGE) ? FALLING_EDGE : RISING_EDGE;
+        }
+    }
+    return info;
 }
 
 delay_t GowinImpl::estimateDelay(WireId src, WireId dst) const
