@@ -169,8 +169,10 @@ struct GowinGlobalRouter
 
     // Dedicated backwards BFS routing for global networks
     template <typename Tfilt>
+    // With reuse_tree the search also ends at a wire that already belongs to the net, so that the
+    // routes to several sinks share one tree instead of each leaving the source on its own wire.
     bool backwards_bfs_route(NetInfo *net, WireId src, WireId dst, int iter_limit, bool strict, Tfilt pip_filter,
-                             std::vector<PipId> *path = nullptr)
+                             std::vector<PipId> *path = nullptr, bool reuse_tree = false)
     {
         // Queue of wires to visit
         std::queue<WireId> visit;
@@ -184,6 +186,7 @@ struct GowinGlobalRouter
 
         visit.push(dst);
         backtrace[dst] = PipId();
+        WireId found = src;
 
         int iter = 0;
 
@@ -214,7 +217,8 @@ struct GowinGlobalRouter
                 visit.push(prev);
                 backtrace[prev] = pip;
                 // Check if we are done yet
-                if (prev == src) {
+                if (prev == src || (reuse_tree && ctx->getBoundWireNet(prev) == net)) {
+                    found = prev;
                     goto done;
                 }
             }
@@ -224,8 +228,8 @@ struct GowinGlobalRouter
             }
         }
 
-        if (backtrace.count(src)) {
-            WireId cursor = src;
+        if (backtrace.count(found)) {
+            WireId cursor = found;
             std::vector<PipId> pips;
             // Create a list of pips on the routed path
             while (true) {
@@ -785,7 +789,7 @@ struct GowinGlobalRouter
             routed = backwards_bfs_route(
                     gate_ni, src_wire, gatewire, 1000000, false,
                     [&](PipId pip, WireId src) { return dcs_input_filter(pip) && !gwu.is_global_pip(pip); },
-                    &gate_bound_pips);
+                    &gate_bound_pips, true);
             if (routed) {
                 // bind src
                 if (ctx->checkWireAvail(src_wire)) {
