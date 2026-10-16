@@ -2088,8 +2088,13 @@ def create_timing_info(chip: Chip, db: chipdb.Device):
                 for name in ["X0CTL", "X0CLK", "FX1"]:
                     tmg.set_pip_class(speed, name, group_to_timingvalue(arc[name]))
                 # wires with presently-unknown delay
-                for name in ["LUT_IN", "DI", "SEL", "CIN", "COUT", "VCC", "VSS", "LW_TAP", "LW_TAP_0", "LW_BRANCH", "LW_SPAN", "ISB"]:
+                for name in ["LUT_IN", "DI", "SEL", "CIN", "COUT", "VCC", "VSS", "LW_SPAN", "ISB"]:
                     tmg.set_pip_class(speed, name, TimingValue())
+                # long-wire segment pips, measured on a GW2AR-18 C8/I7: a connection through a
+                # segment takes about 0.75 ns more than the other pips on its way account for
+                for name in ["LW_TAP", "LW_TAP_0"]:
+                    tmg.set_pip_class(speed, name, TimingValue(400))
+                tmg.set_pip_class(speed, "LW_BRANCH", TimingValue(350))
                 # wires with fanout-only delay; used on cell output pips
                 for name, mapping in [("LUT_OUT", "FFan"), ("FF_OUT", "QFan"), ("OF", "OFFan")]:
                     tmg.set_pip_class(speed, name, TimingValue(), group_to_timingvalue(groups["fanout"][mapping]), TimingValue(round(1e6 / groups["fanout"][f"{mapping}Num"])))
