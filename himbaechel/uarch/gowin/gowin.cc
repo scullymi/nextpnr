@@ -116,6 +116,9 @@ struct GowinImpl : HimbaechelAPI
 
     // bel placement validation
     bool slice_valid(int x, int y, int z) const;
+    bool driver_users_valid(int x, int y, const CellInfo *drv) const;
+    bool sel_reachable(WireId out, WireId xd) const;
+    mutable dict<std::pair<WireId, WireId>, bool> sel_reach;
     bool dsp_valid(Loc l, IdString bel_type, bool explain_invalid) const;
     bool hclk_valid(BelId bel, IdString bel_type) const;
 
@@ -1023,6 +1026,58 @@ void GowinImpl::postRoute()
     }
 }
 
+// Can an output wire reach the SEL wire in front of the flip-flop input xd of the same tile,
+// directly or over one wire in between?
+bool GowinImpl::sel_reachable(WireId out, WireId xd) const
+{
+    auto key = std::make_pair(out, xd);
+    auto found = sel_reach.find(key);
+    if (found != sel_reach.end()) {
+        return found->second;
+    }
+    bool reach = false;
+    for (PipId pip : ctx->getPipsUphill(xd)) {
+        WireId sel = ctx->getPipSrcWire(pip);
+        if (std::string(ctx->nameOfWire(sel)).find("/SEL") == std::string::npos) {
+            continue;
+        }
+        for (PipId pip1 : ctx->getPipsUphill(sel)) {
+            WireId wire = ctx->getPipSrcWire(pip1);
+            if (wire == out) {
+                reach = true;
+                break;
+            }
+            for (PipId pip2 : ctx->getPipsUphill(wire)) {
+                if (ctx->getPipSrcWire(pip2) == out) {
+                    reach = true;
+                    break;
+                }
+            }
+            if (reach) {
+                break;
+            }
+        }
+    }
+    sel_reach[key] = reach;
+    return reach;
+}
+
+// A cell placed into a tile also decides whether the FFs it feeds there may use SEL
+bool GowinImpl::driver_users_valid(int x, int y, const CellInfo *drv) const
+{
+    auto &bels = fast_logic_cell.at(x, y);
+    for (int z = 0; z < (gwu.has_DFF67() ? 8 : 6); ++z) {
+        const CellInfo *ff = bels.at(z * 2 + 1);
+        if (ff && ff->type != id_BLOCKER_FF) {
+            const NetInfo *d = fast_cell_info.at(ff->flat_index).ff_d;
+            if (d && d->driver.cell == drv && !slice_valid(x, y, z)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool GowinImpl::isBelLocationValid(BelId bel, bool explain_invalid) const
 {
     Loc l = ctx->getBelLocation(bel);
@@ -1033,19 +1088,22 @@ bool GowinImpl::isBelLocationValid(BelId bel, bool explain_invalid) const
     switch (bel_type.hash()) {
     case ID_LUT4: /* fall-through */
     case ID_DFF:
-        return slice_valid(l.x, l.y, l.z / 2);
+        return slice_valid(l.x, l.y, l.z / 2) && driver_users_valid(l.x, l.y, ctx->getBoundBelCell(bel));
     case ID_ALU:
-        return slice_valid(l.x, l.y, l.z - BelZ::ALU0_Z);
+        return slice_valid(l.x, l.y, l.z - BelZ::ALU0_Z) &&
+               driver_users_valid(l.x, l.y, ctx->getBoundBelCell(bel));
     case ID_RAM16SDP4:
         return slice_valid(l.x, l.y, 0);
     case ID_MUX2_LUT5:
-        return slice_valid(l.x, l.y, (l.z - BelZ::MUX20_Z) / 2);
+        return slice_valid(l.x, l.y, (l.z - BelZ::MUX20_Z) / 2) &&
+               driver_users_valid(l.x, l.y, ctx->getBoundBelCell(bel));
     case ID_MUX2_LUT6:
-        return slice_valid(l.x, l.y, (l.z - BelZ::MUX21_Z) / 2 + 1);
+        return slice_valid(l.x, l.y, (l.z - BelZ::MUX21_Z) / 2 + 1) &&
+               driver_users_valid(l.x, l.y, ctx->getBoundBelCell(bel));
     case ID_MUX2_LUT7:
-        return slice_valid(l.x, l.y, 3);
+        return slice_valid(l.x, l.y, 3) && driver_users_valid(l.x, l.y, ctx->getBoundBelCell(bel));
     case ID_MUX2_LUT8:
-        return slice_valid(l.x, l.y, 7);
+        return slice_valid(l.x, l.y, 7) && driver_users_valid(l.x, l.y, ctx->getBoundBelCell(bel));
     case ID_PADD9:           /* fall-through */
     case ID_PADD18:          /* fall-through */
     case ID_MULT9X9:         /* fall-through */
@@ -1424,7 +1482,28 @@ bool GowinImpl::slice_valid(int x, int y, int z) const
             } else {
                 src = fast_cell_info.at(alu->flat_index).alu_sum;
             }
-            if (ff_data.ff_d != src && bels.at(mux_z.at(z)) != nullptr) {
+            // The FF can take its input over SEL if the MUX of the slot is free. Few wires lead
+            // into SEL. The outputs of the wide-LUT MUXes drive only a handful of wires, none of
+            // them into a SEL of their own tile: their FFs keep a pass-through LUT. Another
+            // source in the same tile reaches only some SEL wires over an X0 wire, else the
+            // route detours through the neighbouring tiles: no SEL then either.
+            const NetInfo *d = ff_data.ff_d;
+            const CellInfo *drv = d ? d->driver.cell : nullptr;
+            bool sel_blocked = drv && drv->type.in(id_MUX2_LUT5, id_MUX2_LUT6, id_MUX2_LUT7, id_MUX2_LUT8, id_ALU);
+            if (d != src && !sel_blocked && drv && drv->bel != BelId()) {
+                Loc drv_loc = ctx->getBelLocation(drv->bel);
+                if (drv_loc.x == x && drv_loc.y == y) {
+                    IdString pin = d->driver.port;
+                    auto bel_pins = drv->cell_bel_pins.find(pin);
+                    if (bel_pins != drv->cell_bel_pins.end() && !bel_pins->second.empty()) {
+                        pin = bel_pins->second.front();
+                    }
+                    WireId out = ctx->getBelPinWire(drv->bel, pin);
+                    WireId xd = ctx->getBelPinWire(ff->bel, id_D);
+                    sel_blocked = out != WireId() && xd != WireId() && !sel_reachable(out, xd);
+                }
+            }
+            if (d != src && (sel_blocked || bels.at(mux_z.at(z)) != nullptr)) {
                 return false;
             }
         }
