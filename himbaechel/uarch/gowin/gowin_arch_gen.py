@@ -2050,11 +2050,11 @@ def create_timing_info(chip: Chip, db: chipdb.Device):
                 for dp_type in ("DP", "DPX9", "DPB", "DPX9B"):
                     dp = tmg.add_cell_variant(speed, dp_type)
                     add_bram_bus_output(dp, "CLKA", "DOA", 36 if dp_type.startswith("DPX9") else 32, "clka_doa_bypass")
-                    add_bram_bus_output(dp, "CLKB", "DO", 36 if dp_type.startswith("DPX9") else 32, "clkb_dob_bypass")
+                    add_bram_bus_output(dp, "CLKB", "DOB", 36 if dp_type.startswith("DPX9") else 32, "clkb_dob_bypass")
                     add_bram_bus_input(dp, "CLKA", "DIA", 36 if dp_type.startswith("DPX9") else 32, "clka_dia")
                     add_bram_bus_input(dp, "CLKB", "DIB", 36 if dp_type.startswith("DPX9") else 32, "clkb_dib")
                     add_bram_bus_input(dp, "CLKA", "ADA", 14, "clka_ada")
-                    add_bram_bus_input(sp, "CLKB", "ADB", 14, "clkb_adb")
+                    add_bram_bus_input(dp, "CLKB", "ADB", 14, "clkb_adb")
 
                     add_bram_bus_input(dp, "CLKA", "BLKSELA", 3, "clka_blksel")
                     add_bram_bus_input(dp, "CLKB", "BLKSELB", 3, "clkb_blksel")
