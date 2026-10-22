@@ -641,7 +641,8 @@ struct GowinGlobalRouter
         RouteResult route_result = route_direct_net(
                 net,
                 [&](PipId pip, WireId src_wire) {
-                    return global_pip_filter(pip, src_wire) && segment_wire_filter(pip) && dcs_input_filter(pip);
+                    return clock_gate_wire_filter(pip) && global_pip_filter(pip, src_wire) &&
+                           segment_wire_filter(pip) && dcs_input_filter(pip);
                 },
                 src);
         if (route_result == NOT_ROUTED) {
