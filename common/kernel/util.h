@@ -262,6 +262,16 @@ template <typename T> struct reversed_range_t
 
 template <typename T> reversed_range_t<T> reversed_range(T &obj) { return reversed_range_t<T>(obj); }
 
+// x to the power of n >= 0 by repeated multiplication. std::pow with a floating-point exponent calls the
+// C library, whose results differ in the last bits between platforms.
+template <typename T> inline T pow_int(T x, int n)
+{
+    T result = 1;
+    for (int i = 0; i < n; i++)
+        result *= x;
+    return result;
+}
+
 NEXTPNR_NAMESPACE_END
 
 #endif
