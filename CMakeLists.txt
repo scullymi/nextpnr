@@ -253,6 +253,10 @@ else()
 endif()
 
 find_package(Eigen3 REQUIRED NO_MODULE)
+# Eigen's vector kernels round differently per target: from Eigen 5 on, AArch64 uses fused multiply-adds
+# in dot products, x86-64 without FMA does not. The scalar code gives the same HeAP solution everywhere.
+# It is set for the whole build so that every file including Eigen gets the same code.
+add_compile_definitions(EIGEN_DONT_VECTORIZE)
 
 add_subdirectory(3rdparty/json11)
 
