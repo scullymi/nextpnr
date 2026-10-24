@@ -70,7 +70,11 @@ struct arc_entry
         {
             if (lhs.pri != rhs.pri)
                 return lhs.pri < rhs.pri;
-            return lhs.randtag < rhs.randtag;
+            // The arc breaks the rare tie of two random tags, else the order of the two would depend on
+            // the standard library's heap
+            if (lhs.randtag != rhs.randtag)
+                return lhs.randtag < rhs.randtag;
+            return lhs.arc < rhs.arc;
         }
     };
 };
@@ -93,7 +97,15 @@ struct QueuedWire
             NPNR_ASSERT(r >= 0);
             l -= lhs.bonus;
             r -= rhs.bonus;
-            return l == r ? lhs.randtag > rhs.randtag : l > r;
+            if (l != r)
+                return l > r;
+            // Wire and pip break the rare tie of two random tags, else the order of the two would depend
+            // on the standard library's heap
+            if (lhs.randtag != rhs.randtag)
+                return lhs.randtag > rhs.randtag;
+            if (lhs.wire != rhs.wire)
+                return rhs.wire < lhs.wire;
+            return rhs.pip < lhs.pip;
         }
     };
 };

@@ -298,7 +298,13 @@ struct Router2
             {
                 float lhs_score = lhs.score.cost + lhs.score.togo_cost,
                       rhs_score = rhs.score.cost + rhs.score.togo_cost;
-                return lhs_score == rhs_score ? lhs.randtag > rhs.randtag : lhs_score > rhs_score;
+                if (lhs_score != rhs_score)
+                    return lhs_score > rhs_score;
+                // The start wires all have the random tag 0, so the wire breaks the tie, else their order
+                // would depend on the standard library's heap
+                if (lhs.randtag != rhs.randtag)
+                    return lhs.randtag > rhs.randtag;
+                return lhs.wire > rhs.wire;
             }
         };
     };
