@@ -55,15 +55,7 @@ struct GowinGlobalRouter
         return !(gwu.wire_is_clock_gate(dst) && src_type.in(id_GLOBAL_CLK, id_TILE_CLK));
     }
 
-    bool dcs_input_filter(PipId pip) const { return !is_dcs_input(ctx->getPipSrcWire(pip)); }
-
-    bool is_dcs_input(WireId wire) const
-    {
-        return ctx->getWireName(wire)[1].in(
-                id_P16A, id_P16B, id_P16C, id_P16D, id_P17A, id_P17B, id_P17C, id_P17D, id_P26A, id_P26B, id_P26C,
-                id_P26D, id_P27A, id_P27B, id_P27C, id_P27D, id_P36A, id_P36B, id_P36C, id_P36D, id_P37A, id_P37B,
-                id_P37C, id_P37D, id_P46A, id_P46B, id_P46C, id_P46D, id_P47A, id_P47B, id_P47C, id_P47D);
-    }
+    bool dcs_input_filter(PipId pip) const { return !gwu.is_dcs_input(ctx->getPipSrcWire(pip)); }
 
     // allow io->global, global->global and global->tile clock
     bool global_pip_filter(PipId pip, WireId src_wire) const
@@ -636,7 +628,7 @@ struct GowinGlobalRouter
     auto buffered_pip_filter(bool allow_gate) const
     {
         return [this, allow_gate](PipId pip, WireId src_wire, WireId sink) {
-            return (allow_gate || is_dcs_input(sink) || clock_gate_wire_filter(pip)) &&
+            return (allow_gate || gwu.is_dcs_input(sink) || clock_gate_wire_filter(pip)) &&
                    global_pip_filter(pip, src_wire) && segment_wire_filter(pip) && dcs_input_filter(pip);
         };
     }
