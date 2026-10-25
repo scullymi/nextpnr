@@ -292,7 +292,7 @@ struct GowinGlobalRouter
             ctx->bindWire(src, net, STRENGTH_LOCKED);
         }
 
-        RouteResult routed = NOT_ROUTED;
+        bool any_routed = false, any_failed = false;
         for (auto usr : net->users) {
             WireId dst = ctx->getNetinfoSinkWire(net, usr, 0);
             if (dst == WireId()) {
@@ -312,12 +312,10 @@ struct GowinGlobalRouter
                             return pip_filter(pip, src);
                     },
                     path, false, quiet);
-            if (bfs_res) {
-                routed = routed == ROUTED_PARTIALLY ? routed : ROUTED_ALL;
-            } else {
-                routed = routed == NOT_ROUTED ? routed : ROUTED_PARTIALLY;
-            }
+            any_routed |= bfs_res;
+            any_failed |= !bfs_res;
         }
+        RouteResult routed = !any_routed ? NOT_ROUTED : any_failed ? ROUTED_PARTIALLY : ROUTED_ALL;
         if (routed == NOT_ROUTED) {
             if (aux_src == WireId()) {
                 ctx->unbindWire(src);
