@@ -22,12 +22,12 @@
 #include "util.h"
 
 #include <queue>
-#include <type_traits>
 
 #define HIMBAECHEL_CONSTIDS "uarch/gowin/constids.inc"
 #include "himbaechel_constids.h"
 #include "himbaechel_helpers.h"
 
+#include "clock_plan.h"
 #include "globals.h"
 #include "gowin.h"
 #include "gowin_utils.h"
@@ -38,8 +38,16 @@ struct GowinGlobalRouter
 {
     Context *ctx;
     GowinUtils gwu;
+    GowinClockPlanner planner;
 
-    GowinGlobalRouter(Context *ctx) : ctx(ctx) { gwu.init(ctx); };
+    GowinGlobalRouter(Context *ctx)
+            : ctx(ctx), planner(ctx, gwu, [this](PipId pip, WireId src) {
+                  return global_pip_filter(pip, src) && clock_gate_wire_filter(pip) && segment_wire_filter(pip) &&
+                         dcs_input_filter(pip);
+              })
+    {
+        gwu.init(ctx);
+    };
 
     bool global_pip_available(PipId pip) const { return gwu.is_global_pip(pip) || ctx->checkPipAvail(pip); };
 
@@ -167,7 +175,7 @@ struct GowinGlobalRouter
     // With reuse_tree the search also ends at a wire that already belongs to the net, so that the
     // routes to several sinks share one tree instead of each leaving the source on its own wire.
     bool backwards_bfs_route(NetInfo *net, WireId src, WireId dst, int iter_limit, bool strict, Tfilt pip_filter,
-                             std::vector<PipId> *path = nullptr, bool reuse_tree = false, bool quiet = false)
+                             std::vector<PipId> *path = nullptr, bool reuse_tree = false)
     {
         // Queue of wires to visit
         std::queue<WireId> visit;
@@ -254,9 +262,8 @@ struct GowinGlobalRouter
                 log_error("Failed to route net '%s' from %s to %s using dedicated routing.\n", ctx->nameOf(net),
                           ctx->nameOfWire(src), ctx->nameOfWire(dst));
             } else {
-                if (!quiet)
-                    log_warning("Failed to route net '%s' from %s to %s using dedicated routing.\n",
-                                ctx->nameOf(net), ctx->nameOfWire(src), ctx->nameOfWire(dst));
+                log_warning("Failed to route net '%s' from %s to %s using dedicated routing.\n", ctx->nameOf(net),
+                            ctx->nameOfWire(src), ctx->nameOfWire(dst));
                 return false;
             }
         }
@@ -271,7 +278,7 @@ struct GowinGlobalRouter
 
     template <typename Tfilter>
     RouteResult route_direct_net(NetInfo *net, Tfilter pip_filter, WireId aux_src = WireId(),
-                                 std::vector<PipId> *path = nullptr, bool quiet = false)
+                                 std::vector<PipId> *path = nullptr)
     {
         WireId src;
         src = aux_src == WireId() ? ctx->getNetinfoSourceWire(net) : aux_src;
@@ -294,16 +301,7 @@ struct GowinGlobalRouter
             bool bfs_res;
             bfs_res = backwards_bfs_route(
                     net, src, dst, 1000000, false,
-                    [&](PipId pip, WireId src_wire) {
-                        if (is_relaxed_sink(usr))
-                            return true;
-                        // a filter may also look at the sink the search starts from
-                        if constexpr (std::is_invocable_v<Tfilter, PipId, WireId, WireId>)
-                            return pip_filter(pip, src, dst);
-                        else
-                            return pip_filter(pip, src);
-                    },
-                    path, false, quiet);
+                    [&](PipId pip, WireId src_wire) { return (is_relaxed_sink(usr) || pip_filter(pip, src)); }, path);
             any_routed |= bfs_res;
             any_failed |= !bfs_res;
         }
@@ -338,7 +336,8 @@ struct GowinGlobalRouter
         RouteResult route_result = route_direct_net(
                 net,
                 [&](PipId pip, WireId src_wire) {
-                    return global_DQCE_pip_filter(pip, src) && segment_wire_filter(pip) && dcs_input_filter(pip);
+                    return global_DQCE_pip_filter(pip, src) && clock_gate_wire_filter(pip) &&
+                           planner.allows(pip, net) && segment_wire_filter(pip) && dcs_input_filter(pip);
                 },
                 src);
         if (route_result == NOT_ROUTED) {
@@ -440,7 +439,10 @@ struct GowinGlobalRouter
 
         RouteResult route_result = route_direct_net(
                 net,
-                [&](PipId pip, WireId src_wire) { return global_DCS_pip_filter(pip, src) && segment_wire_filter(pip); },
+                [&](PipId pip, WireId src_wire) {
+                    return global_DCS_pip_filter(pip, src) && clock_gate_wire_filter(pip) && planner.allows(pip, net) &&
+                           segment_wire_filter(pip);
+                },
                 src);
         if (route_result == NOT_ROUTED) {
             log_error("Can't route the %s network.\n", ctx->nameOf(net));
@@ -553,13 +555,18 @@ struct GowinGlobalRouter
         RouteResult route_result;
         if (gwu.driver_is_mipi(driver)) {
             route_result = route_direct_net(
-                    net, [&](PipId pip, WireId src_wire) { return segment_wire_filter(pip) && dcs_input_filter(pip); },
+                    net,
+                    [&](PipId pip, WireId src_wire) {
+                        return clock_gate_wire_filter(pip) && planner.allows(pip, net) && segment_wire_filter(pip) &&
+                               dcs_input_filter(pip);
+                    },
                     src, &path);
         } else {
             route_result = route_direct_net(
                     net,
                     [&](PipId pip, WireId src_wire) {
-                        return global_pip_filter(pip, src) && segment_wire_filter(pip) && dcs_input_filter(pip);
+                        return global_pip_filter(pip, src) && clock_gate_wire_filter(pip) && planner.allows(pip, net) &&
+                               segment_wire_filter(pip) && dcs_input_filter(pip);
                     },
                     src, &path);
         }
@@ -621,84 +628,6 @@ struct GowinGlobalRouter
         ctx->cells.erase(dhcen_ci->name);
     }
 
-    // Pip filter for the net after a BUFG. Leaving the global network into another
-    // logic-to-clock gate and coming back on a second spine delays the clock of the sinks behind
-    // it against the rest of the net. Only DCS inputs need that path (see
-    // clock_gate_wire_filter), or allow_gate when all users are behind it.
-    auto buffered_pip_filter(bool allow_gate) const
-    {
-        return [this, allow_gate](PipId pip, WireId src_wire, WireId sink) {
-            return (allow_gate || gwu.is_dcs_input(sink) || clock_gate_wire_filter(pip)) &&
-                   global_pip_filter(pip, src_wire) && segment_wire_filter(pip) && dcs_input_filter(pip);
-        };
-    }
-
-    // Users of net that a BUFG at bel reaches over the global network without a second gate,
-    // -1 if the driver can't reach the input of that BUFG. Leaves the net unrouted.
-    int count_buf_bel_users(NetInfo *net, BelId bel, CellInfo *drv_ci, IdString drv_port)
-    {
-        WireId gate = ctx->getBelPinWire(bel, id_I);
-        if (gate == WireId() || !ctx->checkWireAvail(gate))
-            return -1;
-        route_direct_net(net, buffered_pip_filter(false), gate, nullptr, true);
-        int routed = 0;
-        for (auto &usr : net->users)
-            if (ctx->getBoundWireNet(ctx->getNetinfoSinkWire(net, usr, 0)) == net)
-                ++routed;
-        ctx->ripupNet(net->name);
-        WireId drv = ctx->getBelPinWire(drv_ci->bel, drv_port);
-        bool reached = false;
-        if (ctx->checkWireAvail(drv)) {
-            ctx->bindWire(drv, net, STRENGTH_LOCKED);
-            reached = backwards_bfs_route(
-                    net, drv, gate, 1000000, false,
-                    [&](PipId pip, WireId src_wire) {
-                        return clock_gate_wire_filter(pip) && segment_wire_filter(pip) && dcs_input_filter(pip);
-                    },
-                    nullptr, false, true);
-            ctx->ripupNet(net->name);
-        }
-        return reached ? routed : -1;
-    }
-
-    // Moves the BUFG to the free BUFG bel whose gate reaches the most users of net, the nearest
-    // to the driver among equals. The placed bel stays unless another one reaches more, and a
-    // BUFG placed by the user stays anyway.
-    void choose_buf_bel(NetInfo *net, CellInfo *buf_ci, CellInfo *drv_ci, IdString drv_port)
-    {
-        int users = 0;
-        for (auto &usr : net->users) {
-            NPNR_UNUSED(usr);
-            ++users;
-        }
-        BelId best_bel = buf_ci->bel;
-        int best = count_buf_bel_users(net, best_bel, drv_ci, drv_port);
-        if (best == users || buf_ci->belStrength >= STRENGTH_USER)
-            return;
-        Loc drv_loc = ctx->getBelLocation(drv_ci->bel);
-        int best_dist = std::numeric_limits<int>::max();
-        for (BelId bel : ctx->getBels()) {
-            if (bel == buf_ci->bel || ctx->getBelType(bel) != ctx->getBelType(buf_ci->bel) ||
-                !ctx->checkBelAvail(bel))
-                continue;
-            int n = count_buf_bel_users(net, bel, drv_ci, drv_port);
-            Loc loc = ctx->getBelLocation(bel);
-            int dist = std::abs(loc.x - drv_loc.x) + std::abs(loc.y - drv_loc.y);
-            if (n > best || (n == best && best_bel != buf_ci->bel && dist < best_dist)) {
-                best = n;
-                best_bel = bel;
-                best_dist = dist;
-            }
-        }
-        if (best_bel != buf_ci->bel) {
-            log_info("    '%s' moves from %s to %s, whose gate reaches more of its users.\n", ctx->nameOf(buf_ci),
-                     ctx->nameOfBel(buf_ci->bel), ctx->nameOfBel(best_bel));
-            PlaceStrength strength = buf_ci->belStrength;
-            ctx->unbindBel(buf_ci->bel);
-            ctx->bindBel(best_bel, buf_ci, strength);
-        }
-    }
-
     void route_buffered_net(NetInfo *net)
     {
         // a) route net after buf using the buf input as source
@@ -719,24 +648,20 @@ struct GowinGlobalRouter
             usr.cell->connectPort(usr.port, net);
         }
 
-        // The gate of the BUFG reaches only some spines. If another clock holds the spine of a
-        // quadrant, another BUFG may reach it.
-        CellInfo *true_src_ci = net_before_buf->driver.cell;
-        choose_buf_bel(net, buf_ci, true_src_ci, net_before_buf->driver.port);
-        src = ctx->getBelPinWire(buf_ci->bel, id_I);
-
-        RouteResult route_result = route_direct_net(net, buffered_pip_filter(false), src);
-        if (route_result == NOT_ROUTED) {
-            // all users are behind another gate: one common detour keeps them on the same clock
-            log_warning("'%s' reaches its users only through a second clock gate.\n", ctx->nameOf(net));
-            route_result = route_direct_net(net, buffered_pip_filter(true), src);
-        }
+        RouteResult route_result = route_direct_net(
+                net,
+                [&](PipId pip, WireId src_wire) {
+                    return global_pip_filter(pip, src_wire) && clock_gate_wire_filter(pip) &&
+                           planner.allows(pip, net) && segment_wire_filter(pip) && dcs_input_filter(pip);
+                },
+                src);
         if (route_result == NOT_ROUTED) {
             log_error("Can't route the %s net. It might be worth removing the BUFG buffer flag.\n", ctx->nameOf(net));
         }
 
         // b) route net before buf from whatever to the buf input
         WireId dst = src;
+        CellInfo *true_src_ci = net_before_buf->driver.cell;
         src = ctx->getBelPinWire(true_src_ci->bel, net_before_buf->driver.port);
         ctx->bindWire(src, net, STRENGTH_LOCKED);
         // General routing only: through a free gate and a spine the signal would take the clock
@@ -756,8 +681,8 @@ struct GowinGlobalRouter
     RouteResult route_clk_net(NetInfo *net)
     {
         RouteResult route_result = route_direct_net(net, [&](PipId pip, WireId src_wire) {
-            return clock_gate_wire_filter(pip) && global_pip_filter(pip, src_wire) && segment_wire_filter(pip) &&
-                   dcs_input_filter(pip);
+            return clock_gate_wire_filter(pip) && planner.allows(pip, net) && global_pip_filter(pip, src_wire) &&
+                   segment_wire_filter(pip) && dcs_input_filter(pip);
         });
         if (route_result != NOT_ROUTED) {
             log_info("    '%s' net was routed using global resources %s.\n", ctx->nameOf(net),
@@ -1403,32 +1328,30 @@ struct GowinGlobalRouter
             }
         }
 
-        // nets with DHCEN
-        for (IdString net_name : dhcen_nets) {
-            NetInfo *ni = ctx->nets.at(net_name).get();
-            if (ctx->verbose) {
-                log_info("route dhcen net '%s'\n", ctx->nameOf(ni));
-            }
-            route_dhcen_net(ni);
-        }
+        // the clocks get their BUFG bels, spines and entries before any net is routed from a gate
+        planner.plan(buf_nets, clk_nets);
 
-        // nets with DQCE
-        for (IdString net_name : dqce_nets) {
-            NetInfo *ni = ctx->nets.at(net_name).get();
-            if (ctx->verbose) {
-                log_info("route dqce net '%s'\n", ctx->nameOf(ni));
-            }
-            route_dqce_net(ni);
-        }
-
-        // nets with DCS
-        for (IdString net_name : dcs_nets) {
-            NetInfo *ni = ctx->nets.at(net_name).get();
-            if (ctx->verbose) {
-                log_info("route dcs net '%s'\n", ctx->nameOf(ni));
-            }
-            route_dcs_net(ni);
-        }
+        // The DHCEN, DQCE and DCS nets with a plan route first, then the buffered nets, then the
+        // DHCEN, DQCE and DCS nets without a plan, which take what the planned nets leave.
+        auto route_pseudo = [&](bool planned) {
+            auto each = [&](const std::vector<IdString> &nets, const char *kind,
+                            void (GowinGlobalRouter::*route)(NetInfo *)) {
+                for (IdString net_name : nets) {
+                    NetInfo *ni = ctx->nets.at(net_name).get();
+                    if (planner.is_planned(ni) != planned) {
+                        continue;
+                    }
+                    if (ctx->verbose) {
+                        log_info("route %s net '%s'\n", kind, ctx->nameOf(ni));
+                    }
+                    (this->*route)(ni);
+                }
+            };
+            each(dhcen_nets, "dhcen", &GowinGlobalRouter::route_dhcen_net);
+            each(dqce_nets, "dqce", &GowinGlobalRouter::route_dqce_net);
+            each(dcs_nets, "dcs", &GowinGlobalRouter::route_dcs_net);
+        };
+        route_pseudo(true);
 
         // buffered nets
         for (IdString net_name : buf_nets) {
@@ -1445,6 +1368,8 @@ struct GowinGlobalRouter
             }
             route_buffered_net(ni);
         }
+
+        route_pseudo(false);
 
         // clock nets
         for (IdString net_name : clk_nets) {
