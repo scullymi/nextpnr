@@ -123,6 +123,15 @@ ClockEdge iosel_edge(const CellInfo *cell, IdString inv_param)
 {
     return bool_or_default(cell->params, inv_param) ? FALLING_EDGE : RISING_EDGE;
 }
+
+// postRoute() renames CLK_INT to the physical input used (CLK, or CINY2 when clocked via CP lines)
+IdString ff_clock_port(const CellInfo *cell)
+{
+    for (IdString p : {id_CLK_INT, id_CLK, id_CINY2})
+        if (cell->ports.count(p))
+            return p;
+    return id_CLK_INT;
+}
 } // namespace
 
 bool GateMateImpl::getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort, DelayQuad &delay) const
@@ -186,8 +195,30 @@ bool GateMateImpl::getCellDelay(const CellInfo *cell, IdString fromPort, IdStrin
     } else if (cell->type.in(id_CPE_FF, id_CPE_LATCH, id_CPE_FF_L, id_CPE_FF_U)) {
         return false;
     } else if (cell->type.in(id_CPE_CPLINES)) {
+        // Only report the input->output connection the router actually configured
+        auto bt = pass_backtrace.find(cell->name);
+        if (bt != pass_backtrace.end()) {
+            auto src = bt->second.find(toPort);
+            if (src != bt->second.end() && cell->getPort(src->second) != nullptr && src->second != fromPort)
+                return false;
+        }
+        if (fromPort.in(id_OUT1, id_OUT2)) {
+            get_delay_from_tmg_db(ctx->idf("timing_comb12_%s", toPort.c_str(ctx)), delay);
+            return true;
+        }
+        if (fromPort == id_COMPOUT) {
+            get_delay_from_tmg_db(ctx->idf("timing_comb12_compout_%s", toPort.c_str(ctx)), delay);
+            return true;
+        }
+        if (get_delay_from_tmg_db(ctx->idf("timing__ROUTING_%s_%s", fromPort.c_str(ctx), toPort.c_str(ctx)), delay))
+            return true;
+        // No data for PINY2->POUTX, use the Y1 equivalent
+        if (fromPort == id_PINY2 && toPort == id_POUTX)
+            get_delay_from_tmg_db(ctx->id("timing__ROUTING_PINY1_POUTX"), delay);
         return true;
     } else if (cell->type.in(id_CPE_BRIDGE)) {
+        if (toPort == id_MUXOUT)
+            get_delay_from_tmg_db(ctx->idf("timing__MX8_%s_OUT1", fromPort.c_str(ctx)), delay);
         return true;
     } else if (cell->type.in(id_CPE_COMP)) {
         return get_delay_from_tmg_db(fromPort == id_COMB1 ? id_timing_comb1_compout : id_timing_comb2_compout, delay);
@@ -296,7 +327,7 @@ TimingPortClass GateMateImpl::getPortTimingClass(const CellInfo *cell, IdString 
             return TMG_COMB_OUTPUT;
         return TMG_COMB_INPUT;
     } else if (cell->type.in(id_CPE_FF, id_CPE_FF_L, id_CPE_FF_U, id_CPE_LATCH)) {
-        if (port.in(id_CLK_INT))
+        if (port == ff_clock_port(cell))
             return TMG_CLOCK_INPUT;
         clockInfoCount = 1;
         if (port == id_DOUT)
@@ -441,9 +472,28 @@ int GateMateImpl::ram_clock_index(const CellInfo *cell, const RamPinInfo &pin) c
     int mode = int_or_default(cell->params, id_RAM_cfg_sram_mode, 0);
     bool split = mode & 0b01;
     bool sdp = mode & 0b10;
+    bool fifo_sync = int_or_default(cell->params, id_RAM_cfg_fifo_sync_enable, 0);
+    bool fifo_async = int_or_default(cell->params, id_RAM_cfg_fifo_async_enable, 0);
 
     bool domain_b = pin.port_b;
-    if (sdp) {
+    if (fifo_sync) {
+        // Synchronous FIFO: push and pop both use A_CLK
+        domain_b = false;
+    } else if (fifo_async) {
+        // Asynchronous FIFO: push (write) on port B, pop (read) on port A, in TDP and SDP mode
+        switch (pin.kind) {
+        case RamPinKind::DATA_IN:
+        case RamPinKind::BITMASK:
+            domain_b = true;
+            break;
+        case RamPinKind::DATA_OUT:
+        case RamPinKind::ECC_STATUS:
+            domain_b = false;
+            break;
+        default:
+            break;
+        }
+    } else if (sdp) {
         switch (pin.kind) {
         case RamPinKind::DATA_IN:
         case RamPinKind::BITMASK:
@@ -469,13 +519,14 @@ TimingClockingInfo GateMateImpl::getPortClockingInfo(const CellInfo *cell, IdStr
     info.clockToQ = DelayQuad(0);
     if (cell->type.in(id_CPE_FF, id_CPE_FF_L, id_CPE_FF_U, id_CPE_LATCH)) {
         bool inverted = int_or_default(cell->params, id_C_CPE_CLK, 0) == 0b01;
+        bool clk_via_cp = int_or_default(cell->params, id_C_CLKSEL, 0) == 1;
         info.edge = inverted ? FALLING_EDGE : RISING_EDGE;
-        info.clock_port = id_CLK_INT;
-        if (port.in(id_DIN, id_EN, id_SR))
+        info.clock_port = ff_clock_port(cell);
+        if (port.in(id_DIN, id_EN, id_EN_INT, id_PINY2, id_SR))
             get_setuphold_from_tmg_db(id_timing_del_Setup_D_L, id_timing_del_Hold_D_L, info.setup, info.hold);
         if (port.in(id_DOUT)) {
-            bool is_upper = (cell->bel != BelId()) && (ctx->getBelLocation(cell->bel).z == CPE_LT_U_Z);
-            get_delay_from_tmg_db(id_timing__SEQ_CLK_FF1_Q, info.clockToQ);
+            bool is_upper = (cell->bel != BelId()) && (ctx->getBelLocation(cell->bel).z == CPE_FF_U_Z);
+            get_delay_from_tmg_db(clk_via_cp ? id_timing__SEQ_CINY2_FF1_Q : id_timing__SEQ_CLK_FF1_Q, info.clockToQ);
             DelayQuad delay = DelayQuad{0};
             get_delay_from_tmg_db(is_upper ? id_timing_Q2_OUT2 : id_timing_Q1_OUT1, delay);
             info.clockToQ += delay;
@@ -530,14 +581,22 @@ TimingClockingInfo GateMateImpl::getPortClockingInfo(const CellInfo *cell, IdStr
             else
                 get_delay_from_tmg_db(id_timing_RAM_NOECC_IOPATH_1, info.clockToQ);
         }
+        auto do_reg = [&](char side) {
+            int half = ram_signal_clk.count(port) ? ram_signal_clk.at(port).half : 0;
+            return int_or_default(cell->params, ctx->idf("RAM_cfg_%c%d_set_outputreg", side, half), 0) != 0;
+        };
         if (boost::starts_with(name, "DOA")) {
-            if (is_ecc_a)
+            if (do_reg('a'))
+                get_delay_from_tmg_db(id_timing_RAM_REG_IOPATH_2, info.clockToQ);
+            else if (is_ecc_a)
                 get_delay_from_tmg_db(id_timing_RAM_ECC_IOPATH_2, info.clockToQ);
             else
                 get_delay_from_tmg_db(id_timing_RAM_NOECC_IOPATH_2, info.clockToQ);
         }
         if (boost::starts_with(name, "DOB")) {
-            if (is_ecc_b)
+            if (do_reg('b'))
+                get_delay_from_tmg_db(id_timing_RAM_REG_IOPATH_3, info.clockToQ);
+            else if (is_ecc_b)
                 get_delay_from_tmg_db(id_timing_RAM_ECC_IOPATH_3, info.clockToQ);
             else
                 get_delay_from_tmg_db(id_timing_RAM_NOECC_IOPATH_3, info.clockToQ);
