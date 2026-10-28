@@ -50,8 +50,8 @@ PlacePartition::PlacePartition(Context *ctx)
 
 void PlacePartition::split(Context *ctx, bool yaxis, float pivot, PlacePartition &l, PlacePartition &r)
 {
-    // Many cells share a coordinate. A stable sort keeps them in their current order, std::sort would leave
-    // the order of the partitions to the standard library.
+    // Many cells share a coordinate. The stable sort keeps their order within each partition independent
+    // of the standard library.
     std::stable_sort(cells.begin(), cells.end(), [&](CellInfo *a, CellInfo *b) {
         Loc l0 = ctx->getBelLocation(a->bel), l1 = ctx->getBelLocation(b->bel);
         return yaxis ? (l0.y < l1.y) : (l0.x < l1.x);

@@ -202,9 +202,9 @@ else()
     if (WERROR)
         set(WARN_FLAGS "${WARN_FLAGS} -Werror")
     endif()
-    # GCC and Clang fuse multiplies and adds into FMA instructions where the target has them, each in its
-    # own way. The placers turn the different rounding into different placements, so contraction is off
-    # and the results do not depend on the compiler.
+    # GCC and Clang fuse multiplies and adds into FMA instructions where the target has them, each by its
+    # own rules, and the placers turn the different rounding into different placements. Without
+    # contraction, arithmetic rounds the same with either compiler and on every target.
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffp-contract=off")
     set(CMAKE_CXX_FLAGS_DEBUG "${WARN_FLAGS} -fPIC -ggdb -pipe")
     if (USE_OPENMP)
@@ -253,9 +253,10 @@ else()
 endif()
 
 find_package(Eigen3 REQUIRED NO_MODULE)
-# Eigen's vector kernels round differently per target: from Eigen 5 on, AArch64 uses fused multiply-adds
-# in dot products, x86-64 without FMA does not. The scalar code gives the same HeAP solution everywhere.
-# It is set for the whole build so that every file including Eigen gets the same code.
+# Eigen's vector kernels round differently per target: from Eigen 5 on, dot products use fused
+# multiply-adds on AArch64 but not on x86-64 without FMA, and -ffp-contract=off does not reach these
+# intrinsics. Eigen's scalar code follows the compiler flags. It is set for the whole build so that
+# every file including Eigen gets the same code.
 add_compile_definitions(EIGEN_DONT_VECTORIZE)
 
 add_subdirectory(3rdparty/json11)

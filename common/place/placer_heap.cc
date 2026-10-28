@@ -1914,8 +1914,8 @@ class HeAPPlacer
             for (auto &cell : cut_cells) {
                 total_cells += p->chain_size.count(cell->name) ? p->chain_size.at(cell->name) : 1;
             }
-            // Cells often share a position. A stable sort keeps them in the order they were collected in,
-            // std::sort leaves their order to the standard library, and the cut would differ between them.
+            // Cells often share a position. The stable sort keeps them in the order they were collected in, so
+            // the standard library does not decide which of them end up on each side of the cut.
             std::stable_sort(cut_cells.begin(), cut_cells.end(), [&](const CellInfo *a, const CellInfo *b) {
                 return dir ? (p->cell_locs.at(a->udata).rawy < p->cell_locs.at(b->udata).rawy)
                            : (p->cell_locs.at(a->udata).rawx < p->cell_locs.at(b->udata).rawx);
@@ -2070,15 +2070,15 @@ class HeAPPlacer
             while (pivot > 0 && is_part_overutil(false)) {
                 auto &move_cell = cut_cells.at(pivot);
                 int size = p->chain_size.count(move_cell->name) ? p->chain_size.at(move_cell->name) : 1;
-                left_cells_v.at(cell_index(*cut_cells.at(pivot))) -= size;
-                right_cells_v.at(cell_index(*cut_cells.at(pivot))) += size;
+                left_cells_v.at(cell_index(*move_cell)) -= size;
+                right_cells_v.at(cell_index(*move_cell)) += size;
                 pivot--;
             }
             while (pivot < int(cut_cells.size()) - 1 && is_part_overutil(true)) {
                 auto &move_cell = cut_cells.at(pivot + 1);
                 int size = p->chain_size.count(move_cell->name) ? p->chain_size.at(move_cell->name) : 1;
-                left_cells_v.at(cell_index(*cut_cells.at(pivot))) += size;
-                right_cells_v.at(cell_index(*cut_cells.at(pivot))) -= size;
+                left_cells_v.at(cell_index(*move_cell)) += size;
+                right_cells_v.at(cell_index(*move_cell)) -= size;
                 pivot++;
             }
 
@@ -2089,7 +2089,7 @@ class HeAPPlacer
                     for (int i = cells_start; i < cells_end; i++) {
                         auto &pos = dir ? p->cell_locs.at(cut_cells.at(i)->udata).rawy
                                         : p->cell_locs.at(cut_cells.at(i)->udata).rawx;
-                        pos = area_l + i * ((area_r - area_l) / N);
+                        pos = area_l + (i - cells_start) * ((area_r - area_l) / N);
                     }
                     return;
                 }

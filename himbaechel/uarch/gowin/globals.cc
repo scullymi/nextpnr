@@ -936,9 +936,8 @@ struct GowinGlobalRouter
         // of a few LUTs in the cell gives 400 columns and 400 rows.  We use
         // the combination of row number << 16 and column number as a key.
         auto xy_to_key = [&](int x, int y) -> uint32_t { return (y << 16) | x; };
-        // The nets of a cell stay in the order they were found in, so that the choice between nets with the
-        // same number of sinks below does not depend on the standard library, as the order of equal keys in
-        // a std::unordered_multimap would.
+        // Each cell keeps its nets newest first. Of two nets with the same
+        // number of sinks, the first one in this list gets the segment.
         dict<uint32_t, std::vector<grid_net>> grid;
         int min_x = ctx->getGridDimX();
         int max_x = -1;
@@ -969,7 +968,7 @@ struct GowinGlobalRouter
                         grid_net new_cell;
                         new_cell.net = net_name;
                         new_cell.sink_cnt = 1;
-                        cell_nets.push_back(new_cell);
+                        cell_nets.insert(cell_nets.begin(), new_cell);
                     }
                 }
             }

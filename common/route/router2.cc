@@ -300,8 +300,8 @@ struct Router2
                       rhs_score = rhs.score.cost + rhs.score.togo_cost;
                 if (lhs_score != rhs_score)
                     return lhs_score > rhs_score;
-                // The start wires all have the random tag 0, so the wire breaks the tie, else their order
-                // would depend on the standard library's heap
+                // All start wires have the random tag 0, and random tags can collide. The wire breaks
+                // such ties, so that the order does not depend on the standard library's heap implementation
                 if (lhs.randtag != rhs.randtag)
                     return lhs.randtag > rhs.randtag;
                 return lhs.wire > rhs.wire;

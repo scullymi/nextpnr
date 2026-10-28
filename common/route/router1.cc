@@ -70,8 +70,8 @@ struct arc_entry
         {
             if (lhs.pri != rhs.pri)
                 return lhs.pri < rhs.pri;
-            // The arc breaks the rare tie of two random tags, else the order of the two would depend on
-            // the standard library's heap
+            // If the random tags are equal too, the arc decides, so that the order does not depend on the
+            // standard library's heap implementation
             if (lhs.randtag != rhs.randtag)
                 return lhs.randtag < rhs.randtag;
             return lhs.arc < rhs.arc;
@@ -99,8 +99,8 @@ struct QueuedWire
             r -= rhs.bonus;
             if (l != r)
                 return l > r;
-            // Wire and pip break the rare tie of two random tags, else the order of the two would depend
-            // on the standard library's heap
+            // If the random tags are equal too, wire and pip decide, so that the order does not depend on
+            // the standard library's heap implementation
             if (lhs.randtag != rhs.randtag)
                 return lhs.randtag > rhs.randtag;
             if (lhs.wire != rhs.wire)
