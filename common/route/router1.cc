@@ -70,7 +70,11 @@ struct arc_entry
         {
             if (lhs.pri != rhs.pri)
                 return lhs.pri < rhs.pri;
-            return lhs.randtag < rhs.randtag;
+            // If the random tags are equal too, the arc decides, so that the order does not depend on the
+            // standard library's heap implementation
+            if (lhs.randtag != rhs.randtag)
+                return lhs.randtag < rhs.randtag;
+            return lhs.arc < rhs.arc;
         }
     };
 };
@@ -93,7 +97,15 @@ struct QueuedWire
             NPNR_ASSERT(r >= 0);
             l -= lhs.bonus;
             r -= rhs.bonus;
-            return l == r ? lhs.randtag > rhs.randtag : l > r;
+            if (l != r)
+                return l > r;
+            // If the random tags are equal too, wire and pip decide, so that the order does not depend on
+            // the standard library's heap implementation
+            if (lhs.randtag != rhs.randtag)
+                return lhs.randtag > rhs.randtag;
+            if (lhs.wire != rhs.wire)
+                return rhs.wire < lhs.wire;
+            return rhs.pip < lhs.pip;
         }
     };
 };
