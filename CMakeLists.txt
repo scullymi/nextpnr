@@ -253,6 +253,11 @@ else()
 endif()
 
 find_package(Eigen3 REQUIRED NO_MODULE)
+# Eigen's vector kernels round differently per target: from Eigen 5 on, dot products use fused
+# multiply-adds on AArch64 but not on x86-64 without FMA, and -ffp-contract=off does not reach these
+# intrinsics. Eigen's scalar code follows the compiler flags. It is set for the whole build so that
+# every file including Eigen gets the same code.
+add_compile_definitions(EIGEN_DONT_VECTORIZE)
 
 add_subdirectory(3rdparty/json11)
 
