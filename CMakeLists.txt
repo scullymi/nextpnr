@@ -202,6 +202,10 @@ else()
     if (WERROR)
         set(WARN_FLAGS "${WARN_FLAGS} -Werror")
     endif()
+    # GCC and Clang fuse multiplies and adds into FMA instructions where the target has them, each by its
+    # own rules, and the placers turn the different rounding into different placements. Without
+    # contraction, arithmetic rounds the same with either compiler and on every target.
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffp-contract=off")
     set(CMAKE_CXX_FLAGS_DEBUG "${WARN_FLAGS} -fPIC -ggdb -pipe")
     if (USE_OPENMP)
         set(CMAKE_CXX_FLAGS_RELEASE "${WARN_FLAGS} -fPIC -O3 -g -pipe -fopenmp")
