@@ -262,7 +262,94 @@ void GowinPacker::bsram_fix_sp(CellInfo *ci, std::vector<std::unique_ptr<CellInf
     new_cells.push_back(std::move(ce_pre_dff_cell));
 }
 
-void GowinPacker::pack_ROM(CellInfo *ci)
+// On some chips a narrow port takes its low address bits at every clock,
+// whatever CE says: with CE low the read data keeps following these bits
+// while the upper bits are held. The Gowin IDE puts a hold register in front of
+// each such bit: a DFFE takes the address while CE is high, and a LUT passes
+// the address while CE is high and the held value otherwise. The bits it
+// holds depend on the width of the port, and it does this for every port
+// that can read (SP, both ports of DPB, port B of SDPB and pROM).
+// ce_pin is the CE the BSRAM itself sees, so in SP this runs after the fixes
+// that rewire CE.
+void GowinPacker::bsram_fix_addr_hold(CellInfo *ci, int bit_width, IdString ce_pin, IdString clk_pin,
+                                      char const *ad_fmt, std::vector<std::unique_ptr<CellInfo>> &new_cells)
+{
+    if (!gwu.need_BSRAM_ADDR_hold()) {
+        return;
+    }
+
+    // The held bits run from this one up to AD[3]
+    int first;
+    switch (bit_width) {
+    case 1:
+        first = 0;
+        break;
+    case 2:
+        first = 1;
+        break;
+    case 4:
+        first = 2;
+        break;
+    case 8: /* fallthrough */
+    case 9:
+        first = 3;
+        break;
+    default:
+        return;
+    }
+
+    IdString vcc_name = ctx->id("$PACKER_VCC");
+    IdString gnd_name = ctx->id("$PACKER_GND");
+    auto is_const = [&](NetInfo *net) { return net == nullptr || net->name == vcc_name || net->name == gnd_name; };
+    // A constant CE has nothing to hold, and without a clock the hold register would never load
+    if (is_const(ci->getPort(ce_pin)) || is_const(ci->getPort(clk_pin))) {
+        return;
+    }
+
+    if (ctx->verbose) {
+        log_info("  apply the BSRAM address hold fix to %s of %s\n", ce_pin.c_str(ctx), ctx->nameOf(ci));
+    }
+
+    // The names carry the port because a DPB may need the fix on both ports
+    std::string lut_suffix = std::string("_") + ce_pin.c_str(ctx) + "_addr_hold_lut$";
+    std::string dff_suffix = std::string("_") + ce_pin.c_str(ctx) + "_addr_hold_dff$";
+
+    for (int i = first; i < 4; ++i) {
+        IdString ad_pin = ctx->idf(ad_fmt, i);
+        if (is_const(ci->getPort(ad_pin))) {
+            continue;
+        }
+
+        // F = CE ? address : held value
+        auto lut_cell = gwu.create_cell(gwu.create_aux_name(ci->name, i, lut_suffix.c_str()), id_LUT4);
+        CellInfo *lut = lut_cell.get();
+        lut->addInput(id_I0);
+        lut->addInput(id_I1);
+        lut->addInput(id_I2);
+        lut->addOutput(id_F);
+        lut->setParam(id_INIT, 0xcaca);
+
+        auto dff_cell = gwu.create_cell(gwu.create_aux_name(ci->name, i, dff_suffix.c_str()), id_DFFE);
+        CellInfo *dff = dff_cell.get();
+        dff->addInput(id_D);
+        dff->addInput(id_CE);
+        dff->addInput(id_CLK);
+        dff->addOutput(id_Q);
+
+        ci->movePortTo(ad_pin, lut, id_I1);
+        lut->copyPortTo(id_I1, dff, id_D);
+        ci->copyPortTo(ce_pin, lut, id_I2);
+        ci->copyPortTo(ce_pin, dff, id_CE);
+        ci->copyPortTo(clk_pin, dff, id_CLK);
+        dff->connectPorts(id_Q, lut, id_I0);
+        lut->connectPorts(id_F, ci, ad_pin);
+
+        new_cells.push_back(std::move(lut_cell));
+        new_cells.push_back(std::move(dff_cell));
+    }
+}
+
+void GowinPacker::pack_ROM(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>> &new_cells)
 {
     int default_bw = 32;
     // XXX use block 111
@@ -318,6 +405,7 @@ void GowinPacker::pack_ROM(CellInfo *ci)
         for (int i = 0; i < 14; ++i) {
             ci->renamePort(ctx->idf("AD[%d]", i), ctx->idf("ADB%d", i));
         }
+        bsram_fix_addr_hold(ci, bit_width, id_CEB, id_CLKB, "ADB%d", new_cells);
         bsram_rename_ports(ci, bit_width, "DO[%d]", "DO%d", 18);
     }
 }
@@ -446,6 +534,9 @@ void GowinPacker::pack_SDPB(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>>
     ci->addInput(id_WREB);
     bit_width = ci->params.at(id_BIT_WIDTH_1).as_int64();
 
+    // Some chips do not hold the low read address bits with CE
+    bsram_fix_addr_hold(ci, bit_width, id_CEB, id_CLKB, "ADB[%d]", new_cells);
+
     if (bit_width == 32 || bit_width == 36) {
         ci->connectPort(id_WREB, vcc_net);
         bsram_rename_ports(ci, bit_width, "DO[%d]", "DO%d");
@@ -471,6 +562,7 @@ void GowinPacker::pack_DPB(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>> 
         ci->setParam(id_BIT_WIDTH_0, Property(default_bw, 32));
     }
     int bit_width = ci->params.at(id_BIT_WIDTH_0).as_int64();
+    bsram_fix_addr_hold(ci, bit_width, id_CEA, id_CLKA, "ADA[%d]", new_cells);
     bsram_rename_ports(ci, bit_width, "DIA[%d]", "DIA%d");
 
     if (bit_width < 16 && gwu.need_BSRAM_OUTREG_fix()) {
@@ -488,6 +580,7 @@ void GowinPacker::pack_DPB(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>> 
         ci->setParam(id_BIT_WIDTH_1, Property(default_bw, 32));
     }
     bit_width = ci->params.at(id_BIT_WIDTH_1).as_int64();
+    bsram_fix_addr_hold(ci, bit_width, id_CEB, id_CLKB, "ADB[%d]", new_cells);
     bsram_rename_ports(ci, bit_width, "DIB[%d]", "DIB%d");
 
     if (bit_width < 16 && gwu.need_BSRAM_OUTREG_fix()) {
@@ -593,6 +686,9 @@ void GowinPacker::pack_SP(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>> &
         if (bit_width < 32 && gwu.need_BSRAM_OUTREG_fix()) {
             bsram_fix_outreg(ci, bit_width, id_CE, id_OCE, id_CLK, id_RESET, id_DO, id_READ_MODE, new_cells);
         }
+
+        // Some chips do not hold the low address bits with CE
+        bsram_fix_addr_hold(ci, bit_width, id_CE, id_CLK, "AD[%d]", new_cells);
     }
 
     // XXX UG285-1.3.6_E Gowin BSRAM & SSRAM User Guide:
@@ -658,7 +754,7 @@ void GowinPacker::pack_bsram(void)
         switch (ci->type.hash()) {
         case ID_pROMX9: /* fallthrough */
         case ID_pROM:
-            pack_ROM(ci);
+            pack_ROM(ci, new_cells);
             ci->type = id_ROM;
             break;
         case ID_SDPX9B: /* fallthrough */

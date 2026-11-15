@@ -119,7 +119,9 @@ struct GowinPacker
     void bsram_fix_outreg(CellInfo *ci, int, IdString, IdString, IdString, IdString, IdString, IdString read_mode_param,
                           std::vector<std::unique_ptr<CellInfo>> &new_cells);
     void bsram_fix_sp(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>> &new_cells);
-    void pack_ROM(CellInfo *ci);
+    void bsram_fix_addr_hold(CellInfo *ci, int bit_width, IdString ce_pin, IdString clk_pin, char const *ad_fmt,
+                             std::vector<std::unique_ptr<CellInfo>> &new_cells);
+    void pack_ROM(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>> &new_cells);
     void divide_sdp(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>> &new_cells);
     void pack_SDPB(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>> &new_cells);
     void pack_DPB(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>> &new_cells);

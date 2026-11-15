@@ -114,6 +114,7 @@ struct GowinUtils
     bool need_SDP_fix(void) const;
     bool need_BSRAM_OUTREG_fix(void) const;
     bool need_BSRAM_DP_CE_fix(void) const;
+    bool need_BSRAM_ADDR_hold(void) const;
     bool need_BSRAM_RESET_fix(void) const;
     bool need_BLKSEL_fix(void) const;
     bool has_PLL_HCLK(void) const;
